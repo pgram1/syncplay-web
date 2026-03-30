@@ -2,9 +2,10 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>SyncPlay Ultra • Python Server Edition</title>
     <style>
+        *, *::before, *::after { box-sizing: border-box; }
         :root {
             --accent: #00d4ff;
             --bg: #0a0f1c;
@@ -23,19 +24,22 @@
             align-items: center;
             min-height: 100vh;
             overflow-x: hidden;
+            -webkit-font-smoothing: antialiased;
         }
         .container {
-            width: 95%;
+            width: 100%;
             max-width: 1000px;
             padding: 20px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
         }
         .header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 28px;
             flex-wrap: wrap;
-            gap: 12px;
+            gap: 16px;
         }
         h1 {
             font-size: 2.1rem;
@@ -56,21 +60,23 @@
             transition: all 0.3s ease;
             white-space: nowrap;
         }
-        .status-connected { background: #052e16; color: #4ade80; border: 2px solid #4ade80; }
+        .status-connected    { background: #052e16; color: #4ade80; border: 2px solid #4ade80; }
         .status-reconnecting { background: #451a03; color: #fb923c; border: 2px solid #fb923c; }
         .status-disconnected { background: #450a0a; color: #f87171; border: 2px solid #f87171; }
 
         .main-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 24px;
+            gap: 20px;
         }
         .panel {
             background: var(--panel);
             border-radius: 16px;
             padding: 24px;
             border: 1px solid var(--border);
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3);
+            display: flex;
+            flex-direction: column;
         }
         .label {
             font-size: 0.85rem;
@@ -88,12 +94,13 @@
             padding: 14px 16px;
             border-radius: 10px;
             font-family: monospace;
-            font-size: 1.05rem;
+            font-size: 16px; /* Crucial: 16px stops iOS Safari auto-zoom */
+            -webkit-appearance: none;
         }
         input[type="text"]:focus {
             border-color: var(--accent);
             outline: none;
-            box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.15);
+            box-shadow: 0 0 0 3px rgba(0,212,255,0.15);
         }
         button {
             background: var(--accent);
@@ -105,14 +112,12 @@
             cursor: pointer;
             transition: all 0.2s ease;
             font-size: 1rem;
+            min-height: 48px; /* Standard Apple touch target size */
+            -webkit-appearance: none;
         }
         button:hover, button:active {
             transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(0, 212, 255, 0.35);
-        }
-        button.secondary {
-            background: #334155;
-            color: white;
+            box-shadow: 0 8px 20px rgba(0,212,255,0.35);
         }
 
         .video-wrapper {
@@ -120,18 +125,18 @@
             background: #000;
             border-radius: 16px;
             overflow: hidden;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            margin-top: 28px;
+            box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
         }
         video {
             width: 100%;
             display: block;
             aspect-ratio: 16 / 9;
+            object-fit: contain;
         }
         .overlay {
             position: absolute;
             inset: 0;
-            background: rgba(10, 15, 28, 0.94);
+            background: rgba(10,15,28,0.94);
             display: none;
             flex-direction: column;
             align-items: center;
@@ -145,8 +150,7 @@
         }
         .overlay.show { display: flex; }
         .spinner {
-            width: 52px;
-            height: 52px;
+            width: 52px; height: 52px;
             border: 6px solid rgba(255,255,255,0.2);
             border-top-color: var(--accent);
             border-radius: 50%;
@@ -155,67 +159,49 @@
         }
         @keyframes spin { to { transform: rotate(360deg); } }
 
-        .footer-info {
-            margin-top: 20px;
-            font-size: 0.82rem;
-            color: #64748b;
-            text-align: center;
-            line-height: 1.5;
-        }
-
-        .chat-modal {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
+        /* Integrated Chat Section below video */
+        .chat-container {
             background: var(--panel);
             border-radius: 16px;
-            width: 380px;
-            max-width: 92vw;
-            height: 520px;
-            max-height: 85vh;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
-            z-index: 1000;
-            display: none;
+            border: 1px solid var(--border);
+            display: flex;
             flex-direction: column;
             overflow: hidden;
-            border: 1px solid var(--border);
+            box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3);
         }
-        .chat-modal.show { display: flex; }
         .chat-header {
             padding: 16px 20px;
             background: #161b2e;
             border-bottom: 1px solid var(--border);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
             font-weight: 700;
             font-size: 1.1rem;
         }
         .chat-messages {
-            flex: 1;
+            height: 250px;
             padding: 20px;
             overflow-y: auto;
             background: #0f172a;
             display: flex;
             flex-direction: column;
             gap: 12px;
+            -webkit-overflow-scrolling: touch;
         }
         .chat-input-area {
             padding: 16px;
             border-top: 1px solid var(--border);
             display: flex;
-            gap: 8px;
+            gap: 10px;
             background: var(--panel);
         }
         .chat-input-area input {
             flex: 1;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             background: #0f172a;
             border: 2px solid var(--border);
             color: var(--text);
             padding: 12px 16px;
             border-radius: 10px;
-            font-size: 1rem;
+            font-size: 16px; /* Safari zoom fix */
         }
         .message {
             max-width: 85%;
@@ -224,22 +210,24 @@
             font-size: 0.96rem;
             line-height: 1.45;
         }
-        .message.you {
-            align-self: flex-end;
-            background: rgba(0, 212, 255, 0.18);
-        }
-        .message.friend {
-            align-self: flex-start;
-            background: #1e2937;
+        .message.you    { align-self: flex-end;   background: rgba(0,212,255,0.18); }
+        .message.friend { align-self: flex-start; background: #1e2937; }
+
+        .footer-info {
+            font-size: 0.82rem;
+            color: #64748b;
+            text-align: center;
+            line-height: 1.5;
+            padding-bottom: 20px;
         }
 
+        /* Mobile Adjustments */
         @media (max-width: 768px) {
-            .main-grid { grid-template-columns: 1fr; gap: 20px; }
-            .header { flex-direction: column; align-items: flex-start; gap: 16px; }
+            .main-grid { grid-template-columns: 1fr; }
+            .header { justify-content: center; text-align: center; }
             h1 { font-size: 1.85rem; }
             .panel { padding: 20px; }
-            .video-wrapper { margin-top: 20px; }
-            .chat-modal { width: 94vw; height: 88vh; }
+            .chat-messages { height: 200px; } /* Slightly smaller on phones */
         }
     </style>
 </head>
@@ -247,10 +235,7 @@
 <div class="container">
     <div class="header">
         <h1>SyncPlay Ultra</h1>
-        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-            <div id="status-badge" class="status-badge status-disconnected">🔴 Disconnected</div>
-            <button onclick="toggleChat()" class="secondary" style="padding:10px 16px;">💬 Chat</button>
-        </div>
+        <div id="status-badge" class="status-badge status-disconnected">🔴 Disconnected</div>
     </div>
 
     <div class="main-grid">
@@ -258,290 +243,374 @@
             <div class="label">1. Syncing Server IP</div>
             <input type="text" id="server-ip" value="127.0.0.1" placeholder="127.0.0.1 or LAN IP e.g. 192.168.1.42">
 
-            <div class="label" style="margin-top:22px;">2. Server Port</div>
+            <div class="label" style="margin-top:16px;">2. Server Port</div>
             <input type="text" id="server-port" value="8765" placeholder="8765">
 
-            <div class="label" style="margin-top:22px;">3. Room Code (both must use the exact same)</div>
-            <input type="text" id="room-code" placeholder="e.g. movie-night or friends42" style="margin-bottom:20px;">
+            <div class="label" style="margin-top:16px;">3. Room Code</div>
+            <input type="text" id="room-code" placeholder="e.g. movie-night" style="margin-bottom:16px;">
 
-            <button onclick="connectToRoom()" style="width:100%;">🚀 Connect to Room</button>
+            <button onclick="connectToRoom()" style="width:100%; margin-top: auto;">🚀 Connect to Room</button>
         </div>
 
         <div class="panel">
             <div class="label">4. Load your video (MP4/WebM only – both must use the EXACT same file)</div>
-            <button onclick="document.getElementById('file-input').click()" style="width:100%;">
+            <input type="file" id="file-input" accept="video/mp4,video/webm" style="display:none;">
+            <button onclick="document.getElementById('file-input').click()" style="width:100%; margin-bottom: 16px;">
                 📂 Choose Video File
             </button>
-            <input type="file" id="file-input" accept="video/mp4,video/webm" style="display:none;">
+            <div class="label" style="text-transform: none; font-size: 0.8rem; margin-top: auto;">
+                Make sure you are connected to the room before playing.
+            </div>
         </div>
     </div>
 
     <div class="video-wrapper">
-        <div id="overlay" class="overlay">
+        <div id="overlay" class="overlay show">
             <div class="spinner"></div>
-            <div id="overlay-text">Waiting for partner to join the room...</div>
+            <div id="overlay-text">Connect to a room and load a video to begin.</div>
         </div>
-        <video id="player" controls></video>
+        <video id="player" controls playsinline></video>
+    </div>
+
+    <div class="chat-container">
+        <div class="chat-header">💬 Room Chat</div>
+        <div id="chat-messages" class="chat-messages"></div>
+        <div class="chat-input-area">
+            <input type="text" id="chat-input" placeholder="Type message… (Enter to send)"
+                   onkeypress="if(event.key==='Enter') sendChat();">
+            <button onclick="sendChat()">Send</button>
+        </div>
     </div>
 
     <div class="footer-info">
-        • No host/guest • Last action becomes leader • Smooth slowdown on minor desync • Heartbeat every 1s
-    </div>
-
-    <div id="chat-dialog" class="chat-modal">
-        <div class="chat-header">
-            <span>💬 Live Chat</span>
-            <button onclick="toggleChat()" class="secondary" style="padding:8px 14px; font-size:1.3rem;">✕</button>
-        </div>
-        <div id="chat-messages" class="chat-messages"></div>
-        <div class="chat-input-area">
-            <input type="text" id="chat-input" placeholder="Type message... (Enter to send)" 
-                   onkeypress="if(event.key==='Enter') sendChat();">
-            <button onclick="sendChat()" style="background:var(--accent); color:#000; font-weight:700;">Send</button>
-        </div>
+        • No host/guest &nbsp;•&nbsp; Last action becomes leader &nbsp;•&nbsp; Force-syncs on user action &nbsp;•&nbsp; Heartbeat every 2s
     </div>
 </div>
 
 <script>
-const video = document.getElementById('player');
+// ─── DOM refs ────────────────────────────────────────────────────────────────
+const video       = document.getElementById('player');
 const statusBadge = document.getElementById('status-badge');
-const overlay = document.getElementById('overlay');
+const overlay     = document.getElementById('overlay');
 const overlayText = document.getElementById('overlay-text');
 
-let ws = null;
-let videoReady = false;
-let currentRoom = '';
-let lastMsgTimestamp = 0;
-let blockEvents = false;
-let lastActionTime = 0;
-let myLastActionTime = 0;
-let heartbeatInterval = null;
-let originalRate = 1.0;
-let slowdownActive = false;
+// ─── Sync state ──────────────────────────────────────────────────────────────
+let ws               = null;
+let videoReady       = false;
+let partnerPresent   = false;
+let currentRoom      = '';
 
+let leaderTs         = 0;
+let remoteLeaderTs   = 0;
+
+let remoteApplying   = false;
+let applyLock        = null;
+
+let heartbeatTimer   = null;
+let periodicSyncTimer = null;
+
+let slowdownActive   = false;
+let originalRate     = 1.0;
+
+// ─── Overlay helper ───────────────────────────────────────────────────────────
+function refreshOverlay() {
+    const connected = ws && ws.readyState === WebSocket.OPEN;
+    if (!connected) {
+        overlayText.textContent = "Not connected. Enter server details and connect.";
+        overlay.classList.add('show');
+        return;
+    }
+    if (!videoReady) {
+        overlayText.textContent = "Connected! Now load your video file (step 4).";
+        overlay.classList.add('show');
+        return;
+    }
+    if (!partnerPresent) {
+        overlayText.textContent = "Waiting for your partner to join the same room…";
+        overlay.classList.add('show');
+        return;
+    }
+    overlay.classList.remove('show');
+}
+
+// ─── Connection ───────────────────────────────────────────────────────────────
 function connectToRoom() {
-    const ip = document.getElementById('server-ip').value.trim() || '127.0.0.1';
+    const ip   = document.getElementById('server-ip').value.trim()   || '127.0.0.1';
     const port = document.getElementById('server-port').value.trim() || '8765';
     const room = document.getElementById('room-code').value.trim().toLowerCase().replace(/\s+/g, '-');
 
-    if (!room) return alert("Please enter a Room Code");
+    if (!room) { alert("Please enter a Room Code"); return; }
 
     currentRoom = room;
-    if (ws) ws.close();
+    partnerPresent = false;
+    if (ws) { ws.onclose = null; ws.close(); }
 
     ws = new WebSocket(`ws://${ip}:${port}`);
 
     ws.onopen = () => {
         ws.send(JSON.stringify({ type: "join", room: currentRoom }));
-        updateStatus("🟡 Connecting...", "status-reconnecting");
+        updateStatus("🟡 Connecting…", "status-reconnecting");
         startHeartbeat();
+        refreshOverlay();
     };
 
-    ws.onmessage = (event) => {
-        let data;
-        try { data = JSON.parse(event.data); } catch(e) { return; }
-
-        if (data.type === "joined") {
-            updateStatus("✅ Connected – Both can control", "status-connected");
-            overlayText.textContent = "Waiting for partner to join the room...";
-        }
-        else if (data.type === "partner_joined") {
-            overlayText.textContent = "Partner joined! Both can now play and control.";
-            if (videoReady) sendSync(true);
-        }
-        else if (data.type === "error") {
-            alert("Server error: " + (data.message || "Unknown"));
-            ws?.close();
-        }
-        else if (data.type === "chat") {
-            appendMessage('Friend', data.message);
-        }
-        else if (data.type === "heartbeat_ack") {
-        }
-        else {
-            if (data.ts && data.ts < lastMsgTimestamp) return;
-            lastMsgTimestamp = data.ts || Date.now();
-            applyRemoteState(data);
-        }
-    };
+    ws.onmessage = handleMessage;
 
     ws.onclose = () => {
         updateStatus("🔴 Disconnected", "status-disconnected");
-        overlay.classList.add('show');
+        partnerPresent = false;
         stopHeartbeat();
+        stopPeriodicSync();
+        refreshOverlay();
     };
 
     ws.onerror = () => updateStatus("❌ Connection Failed", "status-disconnected");
 }
 
-function startHeartbeat() {
-    stopHeartbeat();
-    heartbeatInterval = setInterval(() => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "heartbeat" }));
-        }
-    }, 1000);
-}
+function handleMessage(event) {
+    let data;
+    try { data = JSON.parse(event.data); } catch(e) { return; }
 
-function stopHeartbeat() {
-    if (heartbeatInterval) {
-        clearInterval(heartbeatInterval);
-        heartbeatInterval = null;
+    switch (data.type) {
+        case "joined":
+            updateStatus("✅ Connected — waiting for partner", "status-connected");
+            refreshOverlay();
+            break;
+
+        case "partner_joined":
+            partnerPresent = true;
+            updateStatus("✅ Synced — both can control", "status-connected");
+            startPeriodicSync();
+            refreshOverlay();
+            if (videoReady && leaderTs > 0) sendSync(true);
+            break;
+
+        case "partner_left":
+            partnerPresent = false;
+            updateStatus("⚠️ Partner disconnected", "status-reconnecting");
+            stopPeriodicSync();
+            refreshOverlay();
+            break;
+
+        case "sync":
+            applyRemoteState(data);
+            break;
+
+        case "chat":
+            appendMessage('Friend', data.message);
+            break;
+
+        case "heartbeat_ack":
+            break;
+
+        case "error":
+            alert("Server error: " + (data.message || "Unknown"));
+            ws.close();
+            break;
     }
 }
 
-async function applyRemoteState(data) {
-    if (!videoReady) return;
-    blockEvents = true;
-
-    try {
-        if (data.ts) lastActionTime = Math.max(lastActionTime, data.ts);
-
-        if (typeof data.time === 'number') {
-            const drift = video.currentTime - data.time;
-
-            if (Math.abs(drift) > 2.0) {
-                video.currentTime = data.time;
-                restoreRate();
-            } else if (drift > 0.35 && drift < 1.6) {
-                if (!slowdownActive) {
-                    originalRate = video.playbackRate || 1.0;
-                    video.playbackRate = 0.93;
-                    slowdownActive = true;
-                }
-            } else if (drift < -0.8) {
-                video.currentTime = data.time + 0.3;
-                restoreRate();
-            } else if (slowdownActive && drift < 0.15) {
-                restoreRate();
-            }
+// ─── Heartbeat ────────────────────────────────────────────────────────────────
+function startHeartbeat() {
+    stopHeartbeat();
+    heartbeatTimer = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "heartbeat" }));
         }
-
-        if (data.playing !== undefined) {
-            if (data.playing && video.paused) {
-                await video.play().catch(() => {});
-                restoreRate();
-            } else if (!data.playing && !video.paused) {
-                video.pause();
-                restoreRate();
-            }
-        }
-    } catch (e) {}
-
-    setTimeout(() => { blockEvents = false; }, 120);
+    }, 2000);
+}
+function stopHeartbeat() {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
 }
 
-function restoreRate() {
+// ─── Periodic drift-correction sync (leader only, every 3 s) ─────────────────
+function startPeriodicSync() {
+    stopPeriodicSync();
+    periodicSyncTimer = setInterval(() => {
+        if (leaderTs >= remoteLeaderTs && videoReady && partnerPresent) {
+            sendSync(false);
+        }
+    }, 3000);
+}
+function stopPeriodicSync() {
+    clearInterval(periodicSyncTimer);
+    periodicSyncTimer = null;
+}
+
+// ─── Send sync ────────────────────────────────────────────────────────────────
+function sendSync(force) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!videoReady) return;
+    if (remoteApplying) return;
+
+    ws.send(JSON.stringify({
+        type:     "sync",
+        time:     video.currentTime,
+        playing:  !video.paused,
+        leaderTs: leaderTs,
+        force:    !!force
+    }));
+}
+
+// ─── Apply remote state ───────────────────────────────────────────────────────
+async function applyRemoteState(data) {
+    if (!videoReady) return;
+
+    const incomingLeaderTs = data.leaderTs || 0;
+    if (incomingLeaderTs <= leaderTs) return;
+
+    remoteLeaderTs = incomingLeaderTs;
+    setRemoteApplying(true);
+
+    try {
+        const targetTime  = typeof data.time    === 'number' ? data.time    : null;
+        const shouldPlay  = typeof data.playing === 'boolean' ? data.playing : null;
+        const isForced    = !!data.force;
+
+        // ── Time correction ──
+        if (targetTime !== null) {
+            const drift = video.currentTime - targetTime;
+            
+            if (isForced) {
+                // Rule #2: Hard force-seek on manual play/pause/seek actions to ensure exact time matching.
+                video.currentTime = targetTime;
+                restorePlaybackRate();
+            } else if (Math.abs(drift) > 2.0) {
+                // Large drift fallback
+                video.currentTime = targetTime;
+                restorePlaybackRate();
+            } else if (drift > 0.4 && drift < 2.0) {
+                // Background drift correction (ahead)
+                if (!slowdownActive) {
+                    originalRate     = video.playbackRate || 1.0;
+                    video.playbackRate = 0.93;
+                    slowdownActive   = true;
+                }
+            } else if (drift < -0.4) {
+                // Background drift correction (behind)
+                video.currentTime = targetTime + 0.2;
+                restorePlaybackRate();
+            } else if (slowdownActive && Math.abs(drift) < 0.15) {
+                restorePlaybackRate();
+            }
+        }
+
+        // ── Play-state ──
+        if (shouldPlay !== null && (isForced || shouldPlay !== !video.paused)) {
+            if (shouldPlay && video.paused) {
+                await video.play().catch(() => {});
+                restorePlaybackRate();
+            } else if (!shouldPlay && !video.paused) {
+                video.pause();
+                restorePlaybackRate();
+            }
+        }
+    } catch(e) { /* ignore */ }
+
+    // Pad slightly longer to absorb heavy file native DOM seeks safely
+    setRemoteApplying(false, 300);
+}
+
+function setRemoteApplying(on, delay) {
+    if (applyLock) { clearTimeout(applyLock); applyLock = null; }
+    if (on) {
+        remoteApplying = true;
+    } else {
+        applyLock = setTimeout(() => {
+            remoteApplying = false;
+            applyLock = null;
+        }, delay || 0);
+    }
+}
+
+function restorePlaybackRate() {
     if (slowdownActive) {
         video.playbackRate = originalRate;
         slowdownActive = false;
     }
 }
 
-function sendSync(force = false) {
-    if (!ws || ws.readyState !== WebSocket.OPEN || !videoReady || blockEvents) return;
-
-    const now = Date.now();
-    const currentPlaying = !video.paused;
-
-    if (force || (now - lastActionTime < 5000) || (now - lastActionTime > 2000 && currentPlaying)) {
-        ws.send(JSON.stringify({
-            type: "sync",
-            time: Math.max(0, video.currentTime),
-            playing: currentPlaying,
-            ts: now
-        }));
-
-        lastActionTime = now;
-        myLastActionTime = now;
+// ─── User action helpers ──────────────────────────────────────────────────────
+function onUserAction() {
+    leaderTs = Date.now();
+    if (partnerPresent && videoReady) {
+        startPeriodicSync();
     }
 }
 
-video.onplay = () => { 
-    if (!blockEvents) {
-        myLastActionTime = Date.now();
-        lastActionTime = myLastActionTime;
-        restoreRate();
-        sendSync();
-    }
+// ─── Video event handlers ─────────────────────────────────────────────────────
+video.onplay = () => {
+    if (remoteApplying) return;
+    restorePlaybackRate();
+    onUserAction();
+    sendSync(true); // Sending 'true' sets data.force flag
 };
 
-video.onpause = () => { 
-    if (!blockEvents) {
-        myLastActionTime = Date.now();
-        lastActionTime = myLastActionTime;
-        restoreRate();
-        sendSync();
-    }
+video.onpause = () => {
+    if (remoteApplying) return;
+    restorePlaybackRate();
+    onUserAction();
+    sendSync(true); 
 };
 
-video.onseeked = () => { 
-    if (!blockEvents) {
-        myLastActionTime = Date.now();
-        lastActionTime = myLastActionTime;
-        restoreRate();
-        sendSync(true);
-    }
+video.onseeked = () => {
+    if (remoteApplying) return;
+    onUserAction();
+    sendSync(true);
 };
 
-setInterval(() => {
-    if (Date.now() - myLastActionTime < 12000) {
-        sendSync();
-    }
-}, 2000);
-
+// ─── File input ───────────────────────────────────────────────────────────────
 document.getElementById('file-input').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
+    videoReady = false;
     video.src = URL.createObjectURL(file);
-    videoReady = true;
-
-    overlay.classList.add('show');
-    overlayText.textContent = "Loading video...";
 
     video.onloadedmetadata = () => {
-        overlay.classList.remove('show');
-        if (ws && ws.readyState === WebSocket.OPEN) sendSync(true);
+        videoReady = true;
+        refreshOverlay();
+        if (ws && ws.readyState === WebSocket.OPEN && partnerPresent && leaderTs > 0) {
+            sendSync(true);
+        }
     };
 });
 
-function updateStatus(text, className) {
+// ─── Status badge ─────────────────────────────────────────────────────────────
+function updateStatus(text, cls) {
     statusBadge.innerHTML = text;
-    statusBadge.className = `status-badge ${className}`;
+    statusBadge.className = `status-badge ${cls}`;
 }
 
-function toggleChat() {
-    const dialog = document.getElementById('chat-dialog');
-    dialog.classList.toggle('show');
-    if (dialog.classList.contains('show')) {
-        setTimeout(() => document.getElementById('chat-input').focus(), 150);
-    }
-}
-
+// ─── Chat ─────────────────────────────────────────────────────────────────────
 function appendMessage(sender, message) {
     const div = document.createElement('div');
     div.className = `message ${sender === 'You' ? 'you' : 'friend'}`;
-    div.innerHTML = sender === 'You' 
+    div.innerHTML = sender === 'You'
         ? `<strong style="color:var(--accent);">You</strong><br>${message}`
         : `<strong style="color:#94a3b8;">Friend</strong><br>${message}`;
-    document.getElementById('chat-messages').appendChild(div);
-    div.scrollIntoView({ behavior: "smooth" });
+    const chatContainer = document.getElementById('chat-messages');
+    chatContainer.appendChild(div);
+    
+    // Auto scroll down safely
+    chatContainer.scrollTop = chatContainer.scrollHeight;
 }
 
 function sendChat() {
     const input = document.getElementById('chat-input');
     const msg = input.value.trim();
     if (!msg || !ws || ws.readyState !== WebSocket.OPEN) return;
-
     ws.send(JSON.stringify({ type: "chat", message: msg }));
     appendMessage('You', msg);
     input.value = '';
 }
 
+// ─── Cleanup ──────────────────────────────────────────────────────────────────
 window.addEventListener('beforeunload', () => {
     stopHeartbeat();
-    if (ws) ws.close();
+    stopPeriodicSync();
+    if (ws) { ws.onclose = null; ws.close(); }
 });
 </script>
 </body>
