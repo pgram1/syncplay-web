@@ -2,15 +2,14 @@ import asyncio
 import json
 import threading
 import os
+import signal
+import time
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from collections import defaultdict
 import websockets
 
-# room_code -> {"clients": [ws, ...], "last_sync": {...}}
-rooms = defaultdict(lambda: {"clients": [], "last_sync": None})
-
-
-# ─── WebSocket handler ────────────────────────────────────────────────────────
+# room_code -> {"clients": [ws, ...], "state": {"playing": bool, "pos": float, "time": float, "rate": float}}
+rooms = defaultdict(lambda: {"clients": [], "state": None})
 
 async def handler(websocket):
     room_code = None
@@ -23,153 +22,115 @@ async def handler(websocket):
 
             msg_type = data.get("type")
 
-            # ── Join ──────────────────────────────────────────────────────────
+            # --- Join Logic ---
             if msg_type == "join":
                 room_code = data.get("room", "").strip().lower().replace(" ", "-")
                 if not room_code:
-                    await _send(websocket, {"type": "error", "message": "Room code is required"})
-                    room_code = None
+                    await _send(websocket, {"type": "error", "message": "Room code required"})
                     continue
 
                 room = rooms[room_code]
-                clients = room["clients"]
-
-                if len(clients) >= 2:
-                    await _send(websocket, {"type": "error", "message": "Room is full (max 2 people)"})
-                    room_code = None
+                if len(room["clients"]) >= 2:
+                    await _send(websocket, {"type": "error", "message": "Room is full"})
                     continue
 
-                clients.append(websocket)
-                await _send(websocket, {"type": "joined"})
-                print(f"[+] Room '{room_code}' — joined ({len(clients)}/2)")
+                room["clients"].append(websocket)
+                await _send(websocket, {"type": "joined", "room": room_code})
 
-                if len(clients) == 2:
-                    # Notify both that the partner has arrived.
-                    await _broadcast(room_code, {"type": "partner_joined"}, sender=None)
-                    # Catch the new joiner up to the last known playback state.
-                    if room["last_sync"]:
-                        await _send(websocket, room["last_sync"])
+                # Catch up the new joiner to the current state
+                if room["state"]:
+                    await _send(websocket, {"type": "sync", **room["state"]})
 
+                if len(room["clients"]) == 2:
+                    await _broadcast(room_code, {"type": "partner_joined"})
                 continue
 
-            # ── Heartbeat ─────────────────────────────────────────────────────
-            if msg_type == "heartbeat":
-                await _send(websocket, {"type": "heartbeat_ack"})
-                continue
-
-            # ── Sync (relay + cache) ──────────────────────────────────────────
+            # --- Advanced Sync (Interrupt/Seek/Rate) ---
             if msg_type == "sync" and room_code:
-                rooms[room_code]["last_sync"] = data
-                await _relay(room_code, websocket, data)
-                continue
+                # Update the room's source of truth
+                # pos: playback position, time: server timestamp, rate: playback speed
+                rooms[room_code]["state"] = {
+                    "playing": data.get("playing"),
+                    "pos": data.get("pos"),
+                    "rate": data.get("rate", 1.0),
+                    "server_time": time.time()
+                }
+                # Relay the change to the other client immediately
+                await _broadcast(room_code, data, sender=websocket)
 
-            # ── Chat (relay only) ─────────────────────────────────────────────
-            if msg_type == "chat" and room_code:
-                await _relay(room_code, websocket, data)
-                continue
+            # --- Chat ---
+            elif msg_type == "chat" and room_code:
+                await _broadcast(room_code, data, sender=websocket)
+
+            # --- Heartbeat ---
+            elif msg_type == "heartbeat":
+                await _send(websocket, {"type": "heartbeat_ack"})
 
     except websockets.exceptions.ConnectionClosed:
         pass
-    except Exception as exc:
-        print(f"[!] Error in room '{room_code}': {exc}")
     finally:
         _remove_client(room_code, websocket)
 
-
-# ─── Async helpers ────────────────────────────────────────────────────────────
-
+# --- Helpers ---
 async def _send(ws, obj):
     try:
         await ws.send(json.dumps(obj))
-    except Exception:
+    except:
         pass
-
-
-async def _relay(room_code, sender, obj):
-    room = rooms.get(room_code)
-    if not room:
-        return
-    payload = json.dumps(obj)
-    for ws in list(room["clients"]):
-        if ws is not sender:
-            try:
-                await ws.send(payload)
-            except Exception:
-                pass
-
 
 async def _broadcast(room_code, obj, sender=None):
     room = rooms.get(room_code)
-    if not room:
-        return
+    if not room: return
     payload = json.dumps(obj)
+    # Use a list copy to prevent "size changed during iteration" errors
     for ws in list(room["clients"]):
         if ws is not sender:
-            try:
-                await ws.send(payload)
-            except Exception:
-                pass
-
+            await _send(ws, obj)
 
 def _remove_client(room_code, websocket):
-    if not room_code or room_code not in rooms:
-        return
-    room = rooms[room_code]
-    clients = room["clients"]
-    if websocket not in clients:
-        return
+    if room_code in rooms:
+        room = rooms[room_code]
+        if websocket in room["clients"]:
+            room["clients"].remove(websocket)
+            if room["clients"]:
+                asyncio.create_task(_broadcast(room_code, {"type": "partner_left"}))
+            else:
+                del rooms[room_code]
 
-    clients.remove(websocket)
-    print(f"[-] Room '{room_code}' — client left ({len(clients)}/2)")
-
-    if clients:
-        asyncio.get_event_loop().create_task(
-            _send(clients[0], {"type": "partner_left"})
-        )
-    else:
-        del rooms[room_code]
-        print(f"[x] Room '{room_code}' deleted (empty)")
-
-
-# ─── HTTP file server (serves index.html on port 5000) ───────────────────────
-
+# --- HTTP Server ---
 class QuietHandler(SimpleHTTPRequestHandler):
-    def log_message(self, *_):
-        pass  # suppress per-request stdout noise
-
+    def log_message(self, *_): pass
     def end_headers(self):
-        # Disable caching so the browser always picks up the latest index.html
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", "no-store, must-revalidate")
         super().end_headers()
 
-
 def _run_http_server():
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    # Recommended: Move index.html to a 'public' folder to protect your .py source
+    path = os.path.join(os.path.dirname(__file__), "public")
+    if os.path.exists(path): os.chdir(path)
+
     httpd = HTTPServer(("0.0.0.0", 5000), QuietHandler)
-    print("🌐  HTTP server  →  http://0.0.0.0:5000  (serves index.html)")
+    print("🌐 Web UI: http://localhost:5000")
     httpd.serve_forever()
 
-
-# ─── Entry point ──────────────────────────────────────────────────────────────
-
+# --- Main Entry & Interrupt Handling ---
 async def main():
-    print("🚀  SyncPlay Ultra — signaling server starting…")
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
 
-    # HTTP server in a daemon thread (serves index.html)
-    t = threading.Thread(target=_run_http_server, daemon=True)
-    t.start()
+    # Handle Ctrl+C (SIGINT) and Termination (SIGTERM)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_event.set)
 
-    # WebSocket server in the asyncio loop
-    async with websockets.serve(
-        handler,
-        "0.0.0.0",
-        8765,
-        ping_interval=20,
-        ping_timeout=40,
-    ):
-        print("🔌  WebSocket server  →  ws://0.0.0.0:8765  (sync protocol)")
-        await asyncio.Future()
+    print("🚀 SyncPlay Ultra — Starting...")
 
+    threading.Thread(target=_run_http_server, daemon=True).start()
+
+    async with websockets.serve(handler, "0.0.0.0", 8765, ping_interval=20):
+        print("🔌 WebSocket: ws://localhost:8765")
+        await stop_event.wait()
+
+    print("\n🛑 Server shutting down gracefully...")
 
 if __name__ == "__main__":
     asyncio.run(main())
