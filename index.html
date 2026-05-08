@@ -94,7 +94,7 @@
             padding: 14px 16px;
             border-radius: 10px;
             font-family: monospace;
-            font-size: 16px; /* Crucial: 16px stops iOS Safari auto-zoom */
+            font-size: 16px;
             -webkit-appearance: none;
         }
         input[type="text"]:focus {
@@ -112,12 +112,18 @@
             cursor: pointer;
             transition: all 0.2s ease;
             font-size: 1rem;
-            min-height: 48px; /* Standard Apple touch target size */
+            min-height: 48px;
             -webkit-appearance: none;
         }
         button:hover, button:active {
             transform: translateY(-2px);
             box-shadow: 0 8px 20px rgba(0,212,255,0.35);
+        }
+        button:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
         }
 
         .video-wrapper {
@@ -159,7 +165,6 @@
         }
         @keyframes spin { to { transform: rotate(360deg); } }
 
-        /* Integrated Chat Section below video */
         .chat-container {
             background: var(--panel);
             border-radius: 16px;
@@ -201,7 +206,7 @@
             color: var(--text);
             padding: 12px 16px;
             border-radius: 10px;
-            font-size: 16px; /* Safari zoom fix */
+            font-size: 16px;
         }
         .message {
             max-width: 85%;
@@ -221,13 +226,12 @@
             padding-bottom: 20px;
         }
 
-        /* Mobile Adjustments */
         @media (max-width: 768px) {
             .main-grid { grid-template-columns: 1fr; }
             .header { justify-content: center; text-align: center; }
             h1 { font-size: 1.85rem; }
             .panel { padding: 20px; }
-            .chat-messages { height: 200px; } /* Slightly smaller on phones */
+            .chat-messages { height: 200px; }
         }
     </style>
 </head>
@@ -241,7 +245,7 @@
     <div class="main-grid">
         <div class="panel">
             <div class="label">1. Syncing Server IP</div>
-            <input type="text" id="server-ip" value="127.0.0.1" placeholder="127.0.0.1 or LAN IP e.g. 192.168.1.42">
+            <input type="text" id="server-ip" value="127.0.0.1" placeholder="127.0.0.1 or e.g. 192.168.1.42">
 
             <div class="label" style="margin-top:16px;">2. Server Port</div>
             <input type="text" id="server-port" value="8765" placeholder="8765">
@@ -249,7 +253,7 @@
             <div class="label" style="margin-top:16px;">3. Room Code</div>
             <input type="text" id="room-code" placeholder="e.g. movie-night" style="margin-bottom:16px;">
 
-            <button onclick="connectToRoom()" style="width:100%; margin-top: auto;">🚀 Connect to Room</button>
+            <button id="connect-btn" onclick="connectToRoom()" style="width:100%; margin-top: auto;">🚀 Connect to Room</button>
         </div>
 
         <div class="panel">
@@ -283,7 +287,7 @@
     </div>
 
     <div class="footer-info">
-        • No host/guest &nbsp;•&nbsp; Last action becomes leader &nbsp;•&nbsp; Force-syncs on user action &nbsp;•&nbsp; Heartbeat every 2s
+        • No host/guest &nbsp;•&nbsp; Last action becomes leader &nbsp;•&nbsp; Latency-compensated sync &nbsp;•&nbsp; Auto-reconnect
     </div>
 </div>
 
@@ -293,6 +297,7 @@ const video       = document.getElementById('player');
 const statusBadge = document.getElementById('status-badge');
 const overlay     = document.getElementById('overlay');
 const overlayText = document.getElementById('overlay-text');
+const connectBtn  = document.getElementById('connect-btn');
 
 // ─── Sync state ──────────────────────────────────────────────────────────────
 let ws               = null;
@@ -300,17 +305,66 @@ let videoReady       = false;
 let partnerPresent   = false;
 let currentRoom      = '';
 
-let leaderTs         = 0;
-let remoteLeaderTs   = 0;
-
-let remoteApplying   = false;
-let applyLock        = null;
-
-let heartbeatTimer   = null;
+let heartbeatTimer    = null;
 let periodicSyncTimer = null;
 
 let slowdownActive   = false;
 let originalRate     = 1.0;
+
+// ─── High-latency / identity state ────────────────────────────────────────────
+// Unique ID for this browser session — echoed back by the server so we can
+// suppress our own authority echoes without any time-based heuristics.
+const sessionId = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+
+let rttMs              = 0;     // measured round-trip time in milliseconds
+let intentionalClose   = false;
+let reconnectAttempts  = 0;
+let reconnectTimer     = null;
+
+// ─── Precise event suppression ────────────────────────────────────────────────
+// Instead of a blanket "remoteApplying" lock that blocks ALL user events for
+// hundreds of milliseconds, we track exactly which DOM events our own code will
+// fire so we can suppress only those — and let every real user interaction
+// through immediately.
+//
+// When our code calls video.currentTime=x / video.play() / video.pause(), it
+// calls suppressNext('seek'|'play'|'pause') first.  The corresponding event
+// handler checks isOurEvent() and returns early only for that one event.
+// Any extra event (real user input) passes straight through to sendSync().
+const pendingSuppress = { seek: 0, play: 0, pause: 0 };
+
+function suppressNext(type) {
+    pendingSuppress[type]++;
+    // Safety valve: decrement after 2 s in case the event never fires
+    // (e.g., play() rejected, seek to same position on some browsers).
+    setTimeout(() => { if (pendingSuppress[type] > 0) pendingSuppress[type]--; }, 2000);
+}
+
+function isOurEvent(type) {
+    if (pendingSuppress[type] > 0) {
+        pendingSuppress[type]--;
+        return true;   // we caused this — suppress it
+    }
+    return false;      // real user interaction — let it through
+}
+
+const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000]; // exponential backoff cap
+
+// ─── Latency helpers ──────────────────────────────────────────────────────────
+// Peer-relay: message travelled peer→server→us, so worst-case one-way ≈ full RTT.
+function peerOneWayLatencyS() {
+    return rttMs / 1000;
+}
+// Authority: message came directly server→us, so one-way ≈ RTT/2.
+function serverOneWayLatencyS() {
+    return rttMs / 2 / 1000;
+}
+
+// Adaptive drift threshold: base 0.5 s + 1× the peer one-way latency.
+// On a 400 ms RTT link this gives 0.9 s, preventing constant seek spam.
+function driftThresholdS() {
+    return 0.5 + peerOneWayLatencyS();
+}
 
 // ─── Overlay helper ───────────────────────────────────────────────────────────
 function refreshOverlay() {
@@ -333,7 +387,7 @@ function refreshOverlay() {
     overlay.classList.remove('show');
 }
 
-// ─── Connection ───────────────────────────────────────────────────────────────
+// ─── Connection & auto-reconnect ─────────────────────────────────────────────
 function connectToRoom() {
     const ip   = document.getElementById('server-ip').value.trim()   || '127.0.0.1';
     const port = document.getElementById('server-port').value.trim() || '8765';
@@ -341,15 +395,30 @@ function connectToRoom() {
 
     if (!room) { alert("Please enter a Room Code"); return; }
 
-    currentRoom = room;
+    // Cancel any pending auto-reconnect
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    reconnectAttempts = 0;
+    intentionalClose  = false;
+
+    currentRoom    = room;
     partnerPresent = false;
-    if (ws) { ws.onclose = null; ws.close(); }
+    rttMs          = 0;
+
+    _openWs(ip, port, room);
+}
+
+function _openWs(ip, port, room) {
+    if (ws) { ws.onclose = null; ws.onerror = null; ws.close(); }
+
+    updateStatus("🟡 Connecting…", "status-reconnecting");
+    connectBtn.disabled = true;
 
     ws = new WebSocket(`ws://${ip}:${port}`);
 
     ws.onopen = () => {
-        ws.send(JSON.stringify({ type: "join", room: currentRoom }));
-        updateStatus("🟡 Connecting…", "status-reconnecting");
+        reconnectAttempts = 0;
+        ws.send(JSON.stringify({ type: "join", room }));
         startHeartbeat();
         refreshOverlay();
     };
@@ -357,14 +426,30 @@ function connectToRoom() {
     ws.onmessage = handleMessage;
 
     ws.onclose = () => {
-        updateStatus("🔴 Disconnected", "status-disconnected");
-        partnerPresent = false;
         stopHeartbeat();
         stopPeriodicSync();
+        partnerPresent = false;
+        connectBtn.disabled = false;
+
+        if (intentionalClose) return;
+
+        // Auto-reconnect with exponential backoff
+        const delay = RECONNECT_DELAYS[Math.min(reconnectAttempts, RECONNECT_DELAYS.length - 1)];
+        reconnectAttempts++;
+        const seconds = Math.round(delay / 1000);
+        updateStatus(`🟡 Reconnecting in ${seconds}s… (${reconnectAttempts})`, "status-reconnecting");
         refreshOverlay();
+
+        reconnectTimer = setTimeout(() => {
+            updateStatus("🟡 Reconnecting…", "status-reconnecting");
+            _openWs(ip, port, room);
+        }, delay);
     };
 
-    ws.onerror = () => updateStatus("❌ Connection Failed", "status-disconnected");
+    ws.onerror = () => {
+        // onclose fires after onerror; handle retry there
+        updateStatus("❌ Connection error", "status-disconnected");
+    };
 }
 
 function handleMessage(event) {
@@ -374,6 +459,7 @@ function handleMessage(event) {
     switch (data.type) {
         case "joined":
             updateStatus("✅ Connected — waiting for partner", "status-connected");
+            connectBtn.disabled = false;
             refreshOverlay();
             break;
 
@@ -382,7 +468,7 @@ function handleMessage(event) {
             updateStatus("✅ Synced — both can control", "status-connected");
             startPeriodicSync();
             refreshOverlay();
-            if (videoReady && leaderTs > 0) sendSync(true);
+            if (videoReady) sendSync(true);
             break;
 
         case "partner_left":
@@ -401,37 +487,52 @@ function handleMessage(event) {
             break;
 
         case "heartbeat_ack":
+            // Measure RTT: server echoes sentAt unchanged
+            if (typeof data.sentAt === 'number') {
+                rttMs = Date.now() - data.sentAt;
+                // Update status badge to show latency when both connected
+                const connected = ws && ws.readyState === WebSocket.OPEN;
+                if (connected && partnerPresent) {
+                    updateStatus(`✅ Synced &nbsp;<span style="opacity:0.65;font-size:0.85em;">~${rttMs}ms</span>`, "status-connected");
+                } else if (connected) {
+                    updateStatus(`✅ Connected &nbsp;<span style="opacity:0.65;font-size:0.85em;">~${rttMs}ms</span>`, "status-connected");
+                }
+            }
             break;
 
         case "error":
             alert("Server error: " + (data.message || "Unknown"));
+            intentionalClose = true;
             ws.close();
+            connectBtn.disabled = false;
             break;
     }
 }
 
-// ─── Heartbeat ────────────────────────────────────────────────────────────────
+// ─── Heartbeat — also measures RTT ───────────────────────────────────────────
 function startHeartbeat() {
     stopHeartbeat();
     heartbeatTimer = setInterval(() => {
         if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "heartbeat" }));
+            ws.send(JSON.stringify({ type: "heartbeat", sentAt: Date.now() }));
         }
-    }, 2000);
+    }, 3000);   // every 3 s — frequent enough to track RTT changes
 }
 function stopHeartbeat() {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
 }
 
-// ─── Periodic drift-correction sync (leader only, every 3 s) ─────────────────
+// ─── Periodic position update (keeps server state fresh while playing) ────────
 function startPeriodicSync() {
     stopPeriodicSync();
     periodicSyncTimer = setInterval(() => {
-        if (leaderTs >= remoteLeaderTs && videoReady && partnerPresent) {
+        // Send a non-forced position update so the server's authority loop
+        // always has a recent pos to broadcast, even during long playback.
+        if (videoReady && partnerPresent && !video.paused) {
             sendSync(false);
         }
-    }, 3000);
+    }, 5000);
 }
 function stopPeriodicSync() {
     clearInterval(periodicSyncTimer);
@@ -442,85 +543,94 @@ function stopPeriodicSync() {
 function sendSync(force) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (!videoReady) return;
-    if (remoteApplying) return;
+    // No blanket remoteApplying gate here — user events must always go through.
+    // Echo suppression is handled precisely via pendingSuppress / isOurEvent.
 
     ws.send(JSON.stringify({
         type:     "sync",
-        time:     video.currentTime,
+        pos:      video.currentTime,
         playing:  !video.paused,
-        leaderTs: leaderTs,
-        force:    !!force
+        rate:     video.playbackRate || 1.0,
+        force:    !!force,
+        senderId: sessionId,   // server echoes this back; we use it to suppress our own echo
     }));
 }
 
-// ─── Apply remote state ───────────────────────────────────────────────────────
+// ─── Apply remote state (latency-compensated, authority-aware) ────────────────
 async function applyRemoteState(data) {
     if (!videoReady) return;
 
-    const incomingLeaderTs = data.leaderTs || 0;
-    if (incomingLeaderTs <= leaderTs) return;
+    // Echo suppression: the server echoes every sync to ALL clients including
+    // the sender. Drop it immediately if it's our own action bouncing back.
+    if (data.authority && data.senderId === sessionId) return;
 
-    remoteLeaderTs = incomingLeaderTs;
-    setRemoteApplying(true);
+    const shouldPlay = typeof data.playing === 'boolean' ? data.playing : null;
+    const isForced   = !!data.force;
+    const rate       = (typeof data.rate === 'number' && data.rate > 0) ? data.rate : 1.0;
 
-    try {
-        const targetTime  = typeof data.time    === 'number' ? data.time    : null;
-        const shouldPlay  = typeof data.playing === 'boolean' ? data.playing : null;
-        const isForced    = !!data.force;
+    let targetPos = typeof data.pos === 'number' ? data.pos : null;
 
-        // ── Time correction ──
-        if (targetTime !== null) {
-            const drift = video.currentTime - targetTime;
-            
-            if (isForced) {
-                // Rule #2: Hard force-seek on manual play/pause/seek actions to ensure exact time matching.
-                video.currentTime = targetTime;
-                restorePlaybackRate();
-            } else if (Math.abs(drift) > 2.0) {
-                // Large drift fallback
-                video.currentTime = targetTime;
-                restorePlaybackRate();
-            } else if (drift > 0.4 && drift < 2.0) {
-                // Background drift correction (ahead)
-                if (!slowdownActive) {
-                    originalRate     = video.playbackRate || 1.0;
-                    video.playbackRate = 0.93;
-                    slowdownActive   = true;
-                }
-            } else if (drift < -0.4) {
-                // Background drift correction (behind)
-                video.currentTime = targetTime + 0.2;
-                restorePlaybackRate();
-            } else if (slowdownActive && Math.abs(drift) < 0.15) {
-                restorePlaybackRate();
+    // ── Latency compensation ──────────────────────────────────────────────────
+    // Position was correct when the sender captured it; advance by transit time
+    // (RTT/2 = server→us one-way) so we land in the right spot.
+    // Skip on forced seeks — the sender was paused at an intentional position.
+    if (targetPos !== null && shouldPlay && !isForced && rttMs > 0) {
+        targetPos += serverOneWayLatencyS() * rate;
+    }
+
+    // ── Position correction ───────────────────────────────────────────────────
+    if (targetPos !== null) {
+        const drift     = video.currentTime - targetPos;
+        const threshold = driftThresholdS();
+
+        if (isForced || Math.abs(drift) > threshold * 4) {
+            // Hard jump: explicit remote action, or drift so large we must snap
+            suppressNext('seek');
+            video.currentTime = targetPos;
+            restorePlaybackRate();
+        } else if (drift > threshold) {
+            // We are ahead — slow down gently to converge
+            if (!slowdownActive) {
+                originalRate       = video.playbackRate || 1.0;
+                video.playbackRate = Math.max(0.75, originalRate * 0.93);
+                slowdownActive     = true;
             }
+        } else if (drift < -threshold) {
+            // We are behind — skip forward a hair to catch up
+            suppressNext('seek');
+            video.currentTime = targetPos + 0.1;
+            restorePlaybackRate();
+        } else if (slowdownActive && Math.abs(drift) < threshold * 0.3) {
+            restorePlaybackRate();
         }
+    }
 
-        // ── Play-state ──
-        if (shouldPlay !== null && (isForced || shouldPlay !== !video.paused)) {
-            if (shouldPlay && video.paused) {
-                await video.play().catch(() => {});
-                restorePlaybackRate();
-            } else if (!shouldPlay && !video.paused) {
-                video.pause();
-                restorePlaybackRate();
-            }
+    // ── Play-state ────────────────────────────────────────────────────────────
+    if (shouldPlay !== null) {
+        if (shouldPlay && video.paused) {
+            suppressNext('play');
+            await safePlay();
+            restorePlaybackRate();
+        } else if (!shouldPlay && !video.paused) {
+            suppressNext('pause');
+            video.pause();
+            restorePlaybackRate();
         }
-    } catch(e) { /* ignore */ }
-
-    // Pad slightly longer to absorb heavy file native DOM seeks safely
-    setRemoteApplying(false, 300);
+    }
 }
 
-function setRemoteApplying(on, delay) {
-    if (applyLock) { clearTimeout(applyLock); applyLock = null; }
-    if (on) {
-        remoteApplying = true;
-    } else {
-        applyLock = setTimeout(() => {
-            remoteApplying = false;
-            applyLock = null;
-        }, delay || 0);
+// ─── Safe play with retry ─────────────────────────────────────────────────────
+// play() can be rejected if the browser isn't ready or a seek is still pending.
+// Retry up to 3× with a short gap. The suppressNext('play') covers one event
+// across all attempts since play only fires on actual success.
+async function safePlay() {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            await video.play();
+            return;
+        } catch(e) {
+            if (attempt < 2) await new Promise(r => setTimeout(r, 150));
+        }
     }
 }
 
@@ -533,29 +643,32 @@ function restorePlaybackRate() {
 
 // ─── User action helpers ──────────────────────────────────────────────────────
 function onUserAction() {
-    leaderTs = Date.now();
     if (partnerPresent && videoReady) {
         startPeriodicSync();
     }
 }
 
 // ─── Video event handlers ─────────────────────────────────────────────────────
+// isOurEvent() returns true only for the specific event our own code scheduled
+// via suppressNext(). Any additional event (real user input) passes straight
+// through — no blanket lock, no dropped play/pause/seek.
+
 video.onplay = () => {
-    if (remoteApplying) return;
+    if (isOurEvent('play')) return;
     restorePlaybackRate();
     onUserAction();
-    sendSync(true); // Sending 'true' sets data.force flag
+    sendSync(true);
 };
 
 video.onpause = () => {
-    if (remoteApplying) return;
+    if (isOurEvent('pause')) return;
     restorePlaybackRate();
     onUserAction();
-    sendSync(true); 
+    sendSync(true);
 };
 
 video.onseeked = () => {
-    if (remoteApplying) return;
+    if (isOurEvent('seek')) return;
     onUserAction();
     sendSync(true);
 };
@@ -571,15 +684,15 @@ document.getElementById('file-input').addEventListener('change', (e) => {
     video.onloadedmetadata = () => {
         videoReady = true;
         refreshOverlay();
-        if (ws && ws.readyState === WebSocket.OPEN && partnerPresent && leaderTs > 0) {
+        if (ws && ws.readyState === WebSocket.OPEN && partnerPresent) {
             sendSync(true);
         }
     };
 });
 
 // ─── Status badge ─────────────────────────────────────────────────────────────
-function updateStatus(text, cls) {
-    statusBadge.innerHTML = text;
+function updateStatus(html, cls) {
+    statusBadge.innerHTML = html;
     statusBadge.className = `status-badge ${cls}`;
 }
 
@@ -588,13 +701,15 @@ function appendMessage(sender, message) {
     const div = document.createElement('div');
     div.className = `message ${sender === 'You' ? 'you' : 'friend'}`;
     div.innerHTML = sender === 'You'
-        ? `<strong style="color:var(--accent);">You</strong><br>${message}`
-        : `<strong style="color:#94a3b8;">Friend</strong><br>${message}`;
+        ? `<strong style="color:var(--accent);">You</strong><br>${escapeHtml(message)}`
+        : `<strong style="color:#94a3b8;">Friend</strong><br>${escapeHtml(message)}`;
     const chatContainer = document.getElementById('chat-messages');
     chatContainer.appendChild(div);
-    
-    // Auto scroll down safely
     chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function escapeHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 function sendChat() {
@@ -608,8 +723,10 @@ function sendChat() {
 
 // ─── Cleanup ──────────────────────────────────────────────────────────────────
 window.addEventListener('beforeunload', () => {
+    intentionalClose = true;
     stopHeartbeat();
     stopPeriodicSync();
+    clearTimeout(reconnectTimer);
     if (ws) { ws.onclose = null; ws.close(); }
 });
 </script>
